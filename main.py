@@ -83,19 +83,20 @@ def extract_text_from_docx(docx_path):
 
 def ask_claude(prompt):
     """
-    Send a prompt to Claude API and get the response
+    Send a prompt to Claude API and get the response.
+    Uses Claude 3.7 Sonnet with increased token limit.
     """
     print("Sending prompt to Claude API...")
     
     message = client.messages.create(
-        max_tokens=4096,
+        max_tokens=8192,  # Increased from 4096 to 8192
         messages=[
             {
                 "role": "user",
                 "content": prompt,
             }
         ],
-        model="claude-3-5-sonnet-20240620",
+        model="claude-3-7-sonnet-20250219",  # Updated to 3.7 Sonnet
     )
     
     return message.content[0].text
@@ -170,11 +171,6 @@ def update_skills_table(cv_template_path, main_skills, sub_skills, output_folder
     Returns:
     str: Path to the saved document
     """
-    from docx import Document
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    import os
-    from datetime import datetime
-    import shutil
     
     # Create output filename if not provided
     if output_filename is None:
@@ -286,6 +282,239 @@ def update_skills_table(cv_template_path, main_skills, sub_skills, output_folder
     
     return output_path
 
+def extract_summary_from_response(response_text):
+    """
+    Extract the professional summary from Claude's response text.
+    
+    Parameters:
+    response_text (str): Claude's response text
+    
+    Returns:
+    str: Extracted professional summary
+    """
+    # This is a simple extraction that assumes the first paragraph is the summary
+    # You might want to customize this based on Claude's actual response format
+    
+    # Strip any leading/trailing whitespace and split by new lines
+    lines = [line.strip() for line in response_text.split('\n') if line.strip()]
+    
+    # Skip any lines that might be headers or instructions
+    # For example, if Claude responds with "Here's a professional summary:" first
+    start_idx = 0
+    for i, line in enumerate(lines):
+        if "summary" in line.lower() and ":" in line:
+            start_idx = i + 1
+            break
+    
+    # Take the first substantive paragraph after any headers
+    if start_idx < len(lines):
+        return lines[start_idx]
+    
+    # Fallback: just return the first non-empty line
+    for line in lines:
+        if line and not line.startswith("#") and not line.startswith("Here"):
+            return line
+    
+    return ""
+
+def add_professional_summary(cv_path, summary_text, output_folder, output_filename=None):
+    """
+    Adds a professional summary paragraph below the "Professional Summary" header in the CV
+    while preserving all formatting and document structure.
+    
+    Parameters:
+    cv_path (str): Path to the CV document
+    summary_text (str): The professional summary text to add
+    output_folder (str): Folder to save the output document
+    output_filename (str, optional): Name for the output file
+    
+    Returns:
+    str: Path to the saved document
+    """
+    # Create output filename if not provided
+    if output_filename is None:
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        output_filename = f"CV_with_summary-{timestamp}.docx"
+    
+    output_path = os.path.join(output_folder, output_filename)
+    
+    # Make a copy of the CV first to avoid modifying the original
+    temp_path = os.path.join(output_folder, "temp_" + os.path.basename(cv_path))
+    shutil.copy2(cv_path, temp_path)
+    
+    # Load the CV copy
+    doc = Document(temp_path)
+    
+    # Find the "Professional Summary" section
+    summary_section_found = False
+    summary_section_index = None
+    
+    for i, paragraph in enumerate(doc.paragraphs):
+        if "Professional Summary" in paragraph.text:
+            summary_section_found = True
+            summary_section_index = i
+            break
+    
+    if not summary_section_found:
+        print("Warning: 'Professional Summary' section not found in the CV.")
+        os.remove(temp_path)  # Clean up
+        return None
+    
+    # Simple approach: Simply add a new paragraph right after the Professional Summary header
+    if summary_section_index is not None:
+        # Get the summary paragraph's parent element
+        header_paragraph = doc.paragraphs[summary_section_index]
+        
+        # Insert new paragraph after the header
+        new_para = doc.add_paragraph()
+        new_para.text = summary_text
+        
+        # This is the tricky part - we need to make sure the new paragraph appears
+        # right after the Professional Summary header
+        # We'll use the xml element directly
+        body_element = header_paragraph._element.getparent()
+        
+        # Insert the new paragraph right after the header
+        header_index = body_element.index(header_paragraph._element)
+        body_element.insert(header_index + 1, new_para._element)
+    
+    # Save the document
+    doc.save(output_path)
+    print(f"CV with professional summary saved to: {output_path}")
+    
+    # Clean up the temporary file
+    os.remove(temp_path)
+    
+    return output_path
+
+def add_cover_letter_content(template_path, cover_letter_text, output_folder, output_filename="2025_Cover_Letter.docx"):
+    """
+    Adds cover letter content from Claude's response to the cover letter template.
+    The content is added above "Thank you for your consideration,"
+    
+    Parameters:
+    template_path (str): Path to the cover letter template document
+    cover_letter_text (str): The cover letter content to add
+    output_folder (str): Folder to save the output document
+    output_filename (str): Name for the output file (default: "2025_Cover_Letter.docx")
+    
+    Returns:
+    str: Path to the saved document
+    """
+    
+    output_path = os.path.join(output_folder, output_filename)
+    
+    # Make a copy of the template first to avoid modifying the original
+    temp_path = os.path.join(output_folder, "temp_" + os.path.basename(template_path))
+    shutil.copy2(template_path, temp_path)
+    
+    # Load the cover letter template copy
+    doc = Document(temp_path)
+    
+    # Find the "Thank you for your consideration" paragraph
+    thank_you_index = None
+    
+    for i, paragraph in enumerate(doc.paragraphs):
+        if "Thank you for your consideration" in paragraph.text:
+            thank_you_index = i
+            break
+    
+    if thank_you_index is None:
+        print("Warning: 'Thank you for your consideration' text not found in the template.")
+        os.remove(temp_path)  # Clean up
+        return None
+    
+    # Extract company name for greeting if available
+    company_name = ""
+    greeting = f"Dear {company_name} Hiring Manager," if company_name else "Dear Hiring Manager,"
+    
+    # Process the cover letter text - make sure there's a blank line after greeting
+    # and before the content from Claude's response
+    paragraphs = [greeting, ""] + cover_letter_text.split('\n')
+    
+    # Insert the cover letter content before the "Thank you" paragraph
+    # We need to insert in reverse order to maintain correct ordering
+    for i, para_text in enumerate(reversed(paragraphs)):
+        if para_text.strip():  # Only add non-empty paragraphs
+            # Get the "Thank you" paragraph's parent element
+            thank_you_paragraph = doc.paragraphs[thank_you_index]
+            body_element = thank_you_paragraph._element.getparent()
+            
+            # Create a new paragraph for this line of text
+            new_para = doc.add_paragraph(para_text)
+            
+            # Insert the new paragraph before the "Thank you" paragraph
+            body_element.insert(body_element.index(thank_you_paragraph._element), new_para._element)
+    
+    # Add a blank line between the cover letter content and "Thank you"
+    thank_you_paragraph = doc.paragraphs[thank_you_index]
+    body_element = thank_you_paragraph._element.getparent()
+    blank_para = doc.add_paragraph("")
+    body_element.insert(body_element.index(thank_you_paragraph._element), blank_para._element)
+    
+    # Save the document
+    doc.save(output_path)
+    print(f"Cover letter saved to: {output_path}")
+    
+    # Clean up the temporary file
+    os.remove(temp_path)
+    
+    return output_path
+
+def extract_cover_letter_from_response(response_text):
+    """
+    Extract the cover letter content from Claude's response.
+    
+    Parameters:
+    response_text (str): Claude's response text
+    
+    Returns:
+    str: Extracted cover letter content
+    """
+    # Strip any leading/trailing whitespace and split by new lines
+    lines = [line.strip() for line in response_text.split('\n') if line.strip()]
+    
+    # Skip any lines that might be headers or instructions
+    # For example, if Claude responds with explanatory text first
+    start_idx = 0
+    
+    # Look for common greeting patterns that indicate the start of the letter
+    for i, line in enumerate(lines):
+        if (line.startswith("Dear") or 
+            "Hiring Manager" in line or 
+            "Recruiter" in line or
+            "Recruitment" in line):
+            start_idx = i
+            break
+    
+    # If we didn't find a greeting, try to find the first paragraph that looks like content
+    if start_idx == 0:
+        for i, line in enumerate(lines):
+            # Skip lines that look like Claude's explanatory text
+            if (line.startswith("Here") or 
+                "cover letter" in line.lower() or 
+                "draft" in line.lower() or
+                line.startswith("#")):
+                continue
+            else:
+                start_idx = i
+                break
+    
+    # Get all content from the start to the end, omitting any closing like "Sincerely"
+    end_idx = len(lines)
+    for i, line in enumerate(lines[start_idx:], start_idx):
+        if (line.startswith("Sincerely") or 
+            line.startswith("Best") or 
+            line.startswith("Regards") or
+            line.startswith("Thank you")):
+            end_idx = i
+            break
+    
+    # Extract the cover letter content
+    cover_letter_content = "\n".join(lines[start_idx:end_idx])
+    
+    return cover_letter_content
+
 if __name__ == "__main__":
     # Create output folder
     output_folder = create_output_folder("job_application_outputs")
@@ -294,7 +523,9 @@ if __name__ == "__main__":
     assets_folder = os.path.join(os.path.dirname(__file__), "assets")
     skills_path = os.path.join(assets_folder, "skills-prompt.docx")
     job_desc_path = os.path.join(assets_folder, "job-description.docx")
+    personal_summary_prompt_path = os.path.join(assets_folder, "personal_summary_prompt.docx")
     cv_template_path = os.path.join(assets_folder, "CV_Template.docx")
+    cover_letter_template_path = os.path.join(assets_folder, "cover_letter_template.docx")
     
     # Verify files exist
     if not os.path.exists(skills_path):
@@ -314,7 +545,7 @@ if __name__ == "__main__":
     
     # Step 3: Send to Claude API
     claude_response = ask_claude(prompt_text)
-    print("Received response from Claude")
+    print("Received skills response from Claude")
     
     # Step 4: Save Claude's response to a new document
     response_file = save_response_to_docx(claude_response, output_folder)
@@ -332,3 +563,71 @@ if __name__ == "__main__":
         output_folder
     )
     print(f"Updated CV saved to: {updated_cv}")
+
+    # Step 7: Merge the job description to the personal summary prompt document
+    personal_summary_prompt = merge_docx_files(personal_summary_prompt_path, job_desc_path, output_folder)
+    print(f"Successfully created merged document: {personal_summary_prompt}")
+
+    # Step 8: Extract text from the personal summary prompt
+    summary_prompt_text = extract_text_from_docx(personal_summary_prompt)
+    print(f"Extracted {len(summary_prompt_text)} characters from the summary prompt")
+
+    # Step 9: Ask Claude to create a personal summary paragraph
+    claude_summary_response = ask_claude(summary_prompt_text)
+    print("Received personal summary response from Claude")
+
+    # Step 10: Extract the summary from Claude's response
+    summary_text = extract_summary_from_response(claude_summary_response)
+    print(f"Extracted summary: {summary_text[:100]}...")  # Print the first 100 chars
+
+    # Step 11: Add the summary to the CV (use the updated CV from step 6)
+    final_cv = add_professional_summary(
+        updated_cv,
+        summary_text,
+        output_folder,
+        "final_CV.docx"  # Give it a specific name
+    )
+    print(f"Final CV with summary and skills saved to: {final_cv}")
+
+    # Step 12: Verify cover letter template exists
+    if not os.path.exists(cover_letter_template_path):
+        raise FileNotFoundError(f"Cover letter template file not found at {cover_letter_template_path}")
+    
+    if not os.path.exists(personal_summary_prompt_path):
+        print(f"Warning: Personal summary prompt file not found at {personal_summary_prompt_path}")
+        # You could create a default one here if needed
+    
+    # Step 13: Merge the cover letter prompt document with the relevant job description document
+    cover_letter_prompt_path = os.path.join(assets_folder, "cover_letter_prompt_long.docx")
+    if not os.path.exists(cover_letter_prompt_path):
+        raise FileNotFoundError(f"Cover letter prompt file not found at {cover_letter_prompt_path}")
+    
+    cover_letter_prompt = merge_docx_files(cover_letter_prompt_path, job_desc_path, output_folder)
+    print(f"Successfully created merged document for cover letter: {cover_letter_prompt}")
+
+    # Step 14: Extract the complete cover letter prompt document text for the API call
+    cover_letter_prompt_text = extract_text_from_docx(cover_letter_prompt)
+    print(f"Extracted {len(cover_letter_prompt_text)} characters from the cover letter prompt")
+
+    # Step 15: Ask Claude to create a cover letter
+    claude_cover_letter_response = ask_claude(cover_letter_prompt_text)
+    print("Received cover letter response from Claude")
+    
+    # Step 16: Save Claude's cover letter response to a document
+    cover_letter_response_file = save_response_to_docx(claude_cover_letter_response, output_folder)
+    print(f"Cover letter response saved to: {cover_letter_response_file}")
+
+    # Step 17: Extract the cover letter content from Claude's response
+    cover_letter_content = extract_cover_letter_from_response(claude_cover_letter_response)
+    print(f"Extracted cover letter content: {cover_letter_content[:100]}...")  # Print the first 100 chars
+
+    # Step 18: Add the cover letter content to the template
+    final_cover_letter = add_cover_letter_content(
+        cover_letter_template_path,
+        cover_letter_content,
+        output_folder,
+        "2025_Cover_Letter.docx"  # Final filename
+    )
+    print(f"Final cover letter saved to: {final_cover_letter}")
+    
+    print("Job application process completed successfully!")
